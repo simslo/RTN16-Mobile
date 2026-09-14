@@ -88,7 +88,7 @@ replacement = '''    private List<DeviceInfo> parseDevices(String raw) {
     private void addDeviceCard'''
 if not pattern.search(s):
     raise SystemExit('parseDevices method pattern not found')
-s = pattern.sub(replacement, s, count=1)
+s = pattern.sub(lambda m: replacement, s, count=1)
 
 old_card = 'TextView b = text((d.ip == null || d.ip.isEmpty() ? "IP: -" : "IP: " + d.ip) + "\\nMAC: " + d.mac, 13, false);'
 new_card = 'TextView b = text("Povezava: " + d.connection + "\\n" + (d.ip == null || d.ip.isEmpty() ? "IP: -" : "IP: " + d.ip) + "\\nMAC: " + d.mac, 13, false);'
