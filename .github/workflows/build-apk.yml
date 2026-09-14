@@ -28,6 +28,13 @@ jobs:
           unzip -q /tmp/gradle.zip -d /tmp
           /tmp/gradle-8.7/bin/gradle --no-daemon assembleDebug
 
+      - name: Upload APK ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RTN16-Mobile-v0.1-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
       - name: Publish APK as GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
