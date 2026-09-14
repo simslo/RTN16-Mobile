@@ -19,6 +19,7 @@ new = '''settings.setOnClickListener(v -> {
 if old in s:
     s = s.replace(old, new, 1)
 
+# Rename device button and include wired LAN clients.
 s = s.replace('Button dev = button("NAPRAVE NA MOBILE", false);',
               'Button dev = button("POVEZANE NAPRAVE", false);')
 s = s.replace('contentTitle.setText("Naprave na ASUS-MOBILE");',
@@ -95,6 +96,95 @@ new_card = 'TextView b = text("Povezava: " + d.connection + "\\n" + (d.ip == nul
 if old_card not in s:
     raise SystemExit('device card pattern not found')
 s = s.replace(old_card, new_card, 1)
+
+# Add Ping button after status refresh. It always sends exactly four ICMP echo requests.
+ping_anchor = '''        Button refresh = button("OSVEŽI STATUS", false);
+        refresh.setOnClickListener(v -> refreshStatus());
+        buttons.addView(refresh, buttonLp());
+'''
+ping_ui = ping_anchor + '''
+        Button ping = button("PING", false);
+        ping.setOnClickListener(v -> showPingDialog());
+        buttons.addView(ping, buttonLp());
+'''
+if 'Button ping = button("PING", false);' not in s:
+    if ping_anchor not in s:
+        raise SystemExit('refresh button anchor not found')
+    s = s.replace(ping_anchor, ping_ui, 1)
+
+# Add ping dialog and execution methods before settings dialog.
+settings_anchor = '    private void showSettings(boolean required) {'
+ping_methods = '''    private void showPingDialog() {
+        EditText ip = new EditText(this);
+        ip.setSingleLine(true);
+        ip.setText("1.1.1.1");
+        ip.setSelection(ip.getText().length());
+        ip.setHint("IP naslov");
+        ip.setInputType(InputType.TYPE_CLASS_TEXT);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Ping - 4 paketi")
+                .setMessage("Privzeto je 1.1.1.1. IP lahko prepišeš z drugim naslovom.")
+                .setView(ip)
+                .setPositiveButton("PING", (d, w) -> {
+                    String target = ip.getText().toString().trim();
+                    if (!isValidIpv4(target)) {
+                        Toast.makeText(this, "Vpiši veljaven IPv4 naslov.", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    runPing(target);
+                })
+                .setNegativeButton("Prekliči", null)
+                .show();
+    }
+
+    private boolean isValidIpv4(String ip) {
+        String[] parts = ip.split("\\\\.");
+        if (parts.length != 4) return false;
+        for (String part : parts) {
+            if (part.isEmpty() || part.length() > 3) return false;
+            int value = 0;
+            for (int i = 0; i < part.length(); i++) {
+                char c = part.charAt(i);
+                if (c < '0' || c > '9') return false;
+                value = value * 10 + (c - '0');
+            }
+            if (value > 255) return false;
+        }
+        return true;
+    }
+
+    private void runPing(String target) {
+        busy(true);
+        contentTitle.setText("Ping: " + target + " (4x)");
+        content.removeAllViews();
+
+        exec.execute(() -> {
+            try {
+                String out = router.shell("ping -c 4 " + RouterClient.shQuote(target));
+                ui.post(() -> {
+                    busy(false);
+                    TextView result = text(out.isEmpty() ? "Ni odgovora." : out, 14, false);
+                    result.setTypeface(android.graphics.Typeface.MONOSPACE);
+                    result.setTextIsSelectable(true);
+                    result.setBackgroundResource(R.drawable.card_bg);
+                    result.setPadding(dp(14), dp(12), dp(14), dp(12));
+                    content.addView(result, lpMatchWrap());
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    busy(false);
+                    error(e);
+                });
+            }
+        });
+    }
+
+'''
+if 'private void showPingDialog()' not in s:
+    if settings_anchor not in s:
+        raise SystemExit('settings method anchor not found')
+    s = s.replace(settings_anchor, ping_methods + settings_anchor, 1)
 
 p.write_text(s, encoding='utf-8')
 
