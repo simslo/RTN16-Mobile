@@ -34,7 +34,7 @@ jobs:
       - name: Upload APK ZIP artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RTN16-Mobile-v0.2-APK
+          name: RTN16-Mobile-v0.3-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
@@ -42,9 +42,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="v0.2-build-${GITHUB_RUN_NUMBER}-attempt-${GITHUB_RUN_ATTEMPT}"
+          TAG="v0.3-build-${GITHUB_RUN_NUMBER}-attempt-${GITHUB_RUN_ATTEMPT}"
           gh release create "$TAG" \
-            "app/build/outputs/apk/debug/app-debug.apk#RTN16-Mobile-v0.2-debug.apk" \
+            "app/build/outputs/apk/debug/app-debug.apk#RTN16-Mobile-v0.3-debug.apk" \
             --target "$GITHUB_SHA" \
-            --title "RT-N16 Mobile V0.2" \
-            --notes "Adds connected wired LAN clients alongside ASUS-MOBILE Wi-Fi clients. Router settings opens FreshTomato GUI."
+            --title "RT-N16 Mobile V0.3" \
+            --notes "Adds 4-packet ping tool with default target 1.1.1.1 and editable IPv4 target. Includes Wi-Fi and LAN connected devices and FreshTomato GUI shortcut."
