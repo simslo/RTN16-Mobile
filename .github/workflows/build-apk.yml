@@ -20,6 +20,28 @@ jobs:
           git fetch origin "$GITHUB_SHA"
           git checkout "$GITHUB_SHA"
 
+      - name: Patch router settings button
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('app/src/main/java/si/rtn16mobile/MainActivity.java')
+          s = p.read_text(encoding='utf-8')
+          old = 'settings.setOnClickListener(v -> showSettings(false));'
+          new = '''settings.setOnClickListener(v -> {
+              try {
+                  String url = store.getRouter();
+                  if (!url.startsWith("http://") && !url.startsWith("https://")) url = "http://" + url;
+                  Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                  startActivity(i);
+              } catch (Exception e) {
+                  error(e);
+              }
+          });'''
+          if old not in s:
+              raise SystemExit('settings listener pattern not found')
+          p.write_text(s.replace(old, new, 1), encoding='utf-8')
+          PY
+
       - name: Build debug APK
         run: |
           export JAVA_HOME="$JAVA_HOME_17_X64"
@@ -44,4 +66,4 @@ jobs:
             "app/build/outputs/apk/debug/app-debug.apk#RTN16-Mobile-v0.1-debug.apk" \
             --target "$GITHUB_SHA" \
             --title "RT-N16 Mobile V0.1" \
-            --notes "Automatic debug APK build."
+            --notes "Automatic debug APK build. Router settings button opens FreshTomato GUI."
