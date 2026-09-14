@@ -5,20 +5,27 @@ import android.util.Base64;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class RouterClient {
     private final String baseUrl;
-    private final String user;
+    private final String configuredUser;
     private final String pass;
     private final String host;
     private final int port;
+    private String activeUser;
     private String httpId = "";
 
     public RouterClient(String baseUrl, String user, String pass) {
@@ -28,13 +35,14 @@ public class RouterClient {
             while (u.endsWith("/")) u = u.substring(0, u.length() - 1);
             URL parsed = new URL(u);
             if (!"http".equalsIgnoreCase(parsed.getProtocol())) {
-                throw new IllegalArgumentException("RT-N16 mora uporabljati http://, ne https://");
+                throw new IllegalArgumentException("Zaenkrat uporabi http:// naslov routerja");
             }
             this.baseUrl = u;
             this.host = parsed.getHost();
             this.port = parsed.getPort() > 0 ? parsed.getPort() : 80;
-            this.user = user;
-            this.pass = pass;
+            this.configuredUser = (user == null || user.trim().isEmpty()) ? "root" : user.trim();
+            this.activeUser = this.configuredUser;
+            this.pass = pass == null ? "" : pass;
         } catch (Exception e) {
             throw new IllegalArgumentException("Neveljaven naslov routerja: " + baseUrl, e);
         }
@@ -45,18 +53,16 @@ public class RouterClient {
         String body = "action=execute&command=" + URLEncoder.encode(command, "UTF-8");
         if (!httpId.isEmpty()) body += "&_http_id=" + URLEncoder.encode(httpId, "UTF-8");
 
-        RawResponse r = request("POST", "/shell.cgi", body);
+        RawResponse r = authenticatedRequest("POST", "/shell.cgi", body);
         if (r.status >= 400) {
-            throw new Exception("FreshTomato HTTP " + r.status + (r.status == 401 ? " - napačno uporabniško ime ali geslo" : ""));
+            throw new Exception("FreshTomato HTTP " + r.status);
         }
         return decodeCmdResult(r.body);
     }
 
     public String getPage(String path) throws Exception {
-        RawResponse r = request("GET", path, null);
-        if (r.status >= 400) {
-            throw new Exception("FreshTomato HTTP " + r.status + (r.status == 401 ? " - napačno uporabniško ime ali geslo" : ""));
-        }
+        RawResponse r = authenticatedRequest("GET", path, null);
+        if (r.status >= 400) throw new Exception("FreshTomato HTTP " + r.status);
         return r.body;
     }
 
@@ -66,6 +72,7 @@ public class RouterClient {
 
         Pattern[] p = new Pattern[] {
                 Pattern.compile("http_id\\s*[:=]\\s*['\\\"]([^'\\\"]+)['\\\"]", Pattern.CASE_INSENSITIVE),
+                Pattern.compile("['\\\"]?http_id['\\\"]?\\s*:\\s*['\\\"]([^'\\\"]+)['\\\"]", Pattern.CASE_INSENSITIVE),
                 Pattern.compile("_http_id[^>]*value=['\\\"]([^'\\\"]+)['\\\"]", Pattern.CASE_INSENSITIVE),
                 Pattern.compile("_http_id\\s*[:=]\\s*['\\\"]([^'\\\"]+)['\\\"]", Pattern.CASE_INSENSITIVE)
         };
@@ -76,27 +83,74 @@ public class RouterClient {
                 return;
             }
         }
+        // 2024.1 shell.cgi may still accept the request without a visible token.
         httpId = "";
     }
 
     /*
-     * FreshTomato on the RT-N16 uses an old embedded HTTP server. Android's
-     * HttpURLConnection is backed by OkHttp and some Android versions reject
-     * the router's short/old HTTP responses with "unexpected end of stream".
-     * Use a tiny HTTP/1.0 client over a raw socket instead. This is local LAN
-     * traffic only and exactly matches the simple protocol the router expects.
+     * FreshTomato 2024.1 on RT-N16 uses the small built-in micro_httpd server.
+     * We intentionally use a minimal HTTP/1.0 socket client.  Some Android
+     * HttpURLConnection/OkHttp versions report "unexpected end of stream" with
+     * this server.  We also test an unauthenticated request and try the common
+     * FreshTomato GUI usernames (configured, root, admin).  This makes a wrong
+     * GUI username distinguishable from an unreachable router.
      */
-    private RawResponse request(String method, String path, String formBody) throws Exception {
+    private RawResponse authenticatedRequest(String method, String path, String formBody) throws Exception {
+        // First prove that the web server itself answers. A protected page should return 401.
+        RawResponse probe = rawRequest("GET", "/", null, null, null);
+        if (probe == null) {
+            throw new Exception("RT-N16 sprejme TCP povezavo, vendar HTTP strežnik ne odgovori. Preveri ali GUI uporablja HTTP port 80.");
+        }
+
+        Set<String> unique = new LinkedHashSet<>();
+        if (activeUser != null && !activeUser.isEmpty()) unique.add(activeUser);
+        if (configuredUser != null && !configuredUser.isEmpty()) unique.add(configuredUser);
+        unique.add("root");
+        unique.add("admin");
+        List<String> users = new ArrayList<>(unique);
+
+        RawResponse last = null;
+        boolean gotAnyHttp = probe != null;
+
+        for (String u : users) {
+            RawResponse r = rawRequest(method, path, formBody, u, pass);
+            if (r == null) {
+                // Some old httpd builds can simply close on rejected auth. Try next username.
+                continue;
+            }
+            gotAnyHttp = true;
+            last = r;
+            if (r.status != 401) {
+                activeUser = u;
+                return r;
+            }
+        }
+
+        if (gotAnyHttp) {
+            if (probe.status == 401 || (last != null && last.status == 401)) {
+                throw new Exception("Router je dosegljiv, vendar FreshTomato zavrača prijavo. V 'NASTAVITVE ROUTERJA' vpiši isto uporabniško ime in geslo kot za spletni GUI.");
+            }
+            if (last != null) return last;
+        }
+
+        throw new Exception("FreshTomato je zaprl HTTP povezavo brez odgovora");
+    }
+
+    private RawResponse rawRequest(String method, String path, String formBody, String authUser, String authPass) throws Exception {
         byte[] bodyBytes = formBody == null ? new byte[0] : formBody.getBytes(StandardCharsets.UTF_8);
-        String rawCreds = user + ":" + pass;
-        String auth = Base64.encodeToString(rawCreds.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
 
         StringBuilder h = new StringBuilder();
         h.append(method).append(" ").append(path).append(" HTTP/1.0\r\n");
-        h.append("Host: ").append(host).append("\r\n");
-        h.append("Authorization: Basic ").append(auth).append("\r\n");
-        h.append("User-Agent: RTN16-Mobile/0.2\r\n");
-        h.append("Accept: */*\r\n");
+        h.append("Host: ").append(host);
+        if (port != 80) h.append(":").append(port);
+        h.append("\r\n");
+        h.append("User-Agent: Mozilla/5.0 (Android) RTN16-Mobile/0.3\r\n");
+        h.append("Accept: text/html,application/xhtml+xml,*/*\r\n");
+        if (authUser != null) {
+            String rawCreds = authUser + ":" + (authPass == null ? "" : authPass);
+            String auth = Base64.encodeToString(rawCreds.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
+            h.append("Authorization: Basic ").append(auth).append("\r\n");
+        }
         h.append("Connection: close\r\n");
         if (formBody != null) {
             h.append("Content-Type: application/x-www-form-urlencoded\r\n");
@@ -106,7 +160,7 @@ public class RouterClient {
 
         byte[] all;
         try (Socket socket = new Socket()) {
-            socket.connect(new java.net.InetSocketAddress(host, port), 5000);
+            socket.connect(new InetSocketAddress(host, port), 5000);
             socket.setSoTimeout(15000);
             OutputStream out = socket.getOutputStream();
             out.write(h.toString().getBytes(StandardCharsets.ISO_8859_1));
@@ -121,7 +175,7 @@ public class RouterClient {
             all = buf.toByteArray();
         }
 
-        if (all.length == 0) throw new Exception("FreshTomato je zaprl HTTP povezavo brez odgovora");
+        if (all.length == 0) return null;
 
         String raw = new String(all, StandardCharsets.ISO_8859_1);
         int split = raw.indexOf("\r\n\r\n");
@@ -133,9 +187,8 @@ public class RouterClient {
         if (split < 0) throw new Exception("Neveljaven HTTP odgovor iz FreshTomato");
 
         String headers = raw.substring(0, split);
-        byte[] payload = java.util.Arrays.copyOfRange(all,
-                raw.substring(0, split + sepLen).getBytes(StandardCharsets.ISO_8859_1).length,
-                all.length);
+        int payloadStart = split + sepLen;
+        byte[] payload = Arrays.copyOfRange(all, payloadStart, all.length);
 
         int status = 0;
         Matcher sm = Pattern.compile("^HTTP/\\S+\\s+(\\d{3})", Pattern.CASE_INSENSITIVE).matcher(headers);
@@ -147,6 +200,7 @@ public class RouterClient {
         RawResponse rr = new RawResponse();
         rr.status = status == 0 ? 200 : status;
         rr.body = new String(payload, StandardCharsets.UTF_8);
+        rr.headers = headers;
         return rr;
     }
 
@@ -188,6 +242,7 @@ public class RouterClient {
     private static class RawResponse {
         int status;
         String body;
+        String headers;
     }
 
     private static String decodeCmdResult(String s) {
